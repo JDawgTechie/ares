@@ -1,9 +1,14 @@
 auto SPU::Voice::sample(s32 modulation) -> std::pair<s32, s32> {
-  if(adsr.phase == ADSR::Phase::Off && !self.irq.enable) {
+  if(keyOnDelay) {
+    if(keyOnDelay == 4) endx = 0;
+    keyOnDelay--;
+    if(keyOnDelay) {
+      n16 header = self.readRAM(adpcm.currentAddress);
+      if(header.bit(10)) adpcm.repeatAddress = adpcm.currentAddress;
+    }
     adsr.lastVolume = 0;
     return {0, 0};
   }
-
   s32 l = 0;
   s32 r = 0;
 
@@ -18,17 +23,19 @@ auto SPU::Voice::sample(s32 modulation) -> std::pair<s32, s32> {
   }
 
   s32 volume = 0;
-  if(non) {
-    volume = self.noise.level;
-  } else {
-    volume = gaussianInterpolate();
+  if(adsr.volume) {
+    if(non) {
+      volume = self.noise.level;
+    } else {
+      volume = gaussianInterpolate();
+    }
+    volume = amplify(volume, adsr.volume);
   }
-  volume = amplify(volume, adsr.volume);
   adsr.lastVolume = volume;
   if(adsr.phase != ADSR::Phase::Off) tickEnvelope();
 
   u16 step = adpcm.sampleRate;
-  if(pmon) step = amplify(step, sclamp<16>(modulation) + 0x8000);
+  if(pmon) step = amplify(s16(step), sclamp<16>(modulation) + 0x8000);
   counter += uclamp<14>(step);
   if(counter >> 12 >= 28) {
     counter -= 28 << 12;
@@ -36,11 +43,8 @@ auto SPU::Voice::sample(s32 modulation) -> std::pair<s32, s32> {
     adpcm.currentAddress += 16;
     if(block.loopEnd) {
       endx = 1;
-      if(!block.loopRepeat) {
-        forceOff();
-      } else {
-        adpcm.currentAddress = adpcm.repeatAddress & ~15;
-      }
+      adpcm.currentAddress = adpcm.repeatAddress & ~15;
+      if(!block.loopRepeat) forceOff();
     }
   }
 
@@ -54,6 +58,7 @@ auto SPU::Voice::sample(s32 modulation) -> std::pair<s32, s32> {
 auto SPU::Voice::tickEnvelope() -> void {
   if(adsr.phase == ADSR::Phase::Off) return;
   adsr.volume = envelope.tick(adsr.volume);
+  if(adsr.phase == ADSR::Phase::Sustain) return;
   if(envelope.decreasing == 0 && adsr.volume >= adsr.target) advancePhase();
   if(envelope.decreasing == 1 && adsr.volume <= adsr.target) advancePhase();
 }
@@ -87,12 +92,13 @@ auto SPU::Voice::updateEnvelope() -> void {
     break;
   case ADSR::Phase::Release:
     adsr.target = 0;
-    envelope.reset(release.rate << 2, 1, release.exponential);
+    envelope.reset(release.rate << 2, 1, release.exponential, 0x7c);  //five-bit release rate
     break;
   }
 }
 
 auto SPU::Voice::forceOff() -> void {
+  keyOnDelay = 0;
   if(adsr.phase == ADSR::Phase::Off) return;
   adsr.phase = ADSR::Phase::Off;
   adsr.volume = 0;
@@ -108,11 +114,13 @@ auto SPU::Voice::keyOff() -> void {
 
 auto SPU::Voice::keyOn() -> void {
   kon = 0;
+  counter = 0;
   adpcm.currentAddress = adpcm.startAddress & ~15;
   adpcm.hasSamples = 0;
   adpcm.ignoreLoopAddress = 0;
   adpcm.lastSamples[0] = 0;
   adpcm.lastSamples[1] = 0;
+  keyOnDelay = 4;
   adsr.phase = ADSR::Phase::Attack;
   adsr.volume = 0;
   updateEnvelope();

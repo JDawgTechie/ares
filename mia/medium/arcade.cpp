@@ -93,7 +93,26 @@ auto Arcade::load(string location) -> LoadResult {
   if(manifest) {
     auto document = BML::unserialize(manifest);
     if(!document) return couldNotParseManifest;
-    return loadGeneric(location, document);
+    if(document["game/board"].string() == "snk/neogeo") {
+      auto arcadeManifest = manifest;
+      auto neoGeo = Medium::create("Neo Geo");
+      auto result = neoGeo->load(location);
+      if(result != successful) return result;
+      neoGeo->pak->setAttribute("arcade", "neogeo");
+      neoGeo->pak->append("arcade.bml", arcadeManifest);
+      neoGeo->pak->append("dips.bml", 0);
+      this->location = neoGeo->location;
+      this->manifest = arcadeManifest;
+      this->pak = neoGeo->pak;
+      Pak::load("dips.bml", ".dip");
+      return successful;
+    }
+    auto result = document["game/board"].string() == "nintendo/vs" ? loadVs(location, document) : loadGeneric(location, document);
+    if(result == successful) {
+      pak->append("dips.bml", 0);
+      Pak::load("dips.bml", ".dip");
+    }
+    return result;
   }
 
   VsSystemDatabase vsDatabase;
@@ -107,7 +126,12 @@ auto Arcade::load(string location) -> LoadResult {
     if(manifest) {
       auto document = BML::unserialize(manifest);
       if(!document) return couldNotParseManifest;
-      return loadVs(location, document);
+      auto result = loadVs(location, document);
+      if(result == successful) {
+        pak->append("dips.bml", 0);
+        Pak::load("dips.bml", ".dip");
+      }
+      return result;
     }
   }
 
@@ -121,6 +145,27 @@ auto Arcade::loadGeneric(string location, Markup::Node& document) -> LoadResult 
   auto resolver = [&](string parent) -> Markup::Node {
     return BML::unserialize(manifestDatabaseArcade(parent));
   };
+
+  if(document["game/board"].string() == "sega/segae") {
+    auto rom = loadRoms(location, document, "maincpu", resolver);
+    if(!rom) return {invalidROM, assemblyError(rom)};
+    if(rom.data.empty()) return {invalidROM, "Ensure your ROM is in a MAME-compatible .zip format."};
+
+    auto key = loadRoms(location, document, "maincpu-key", resolver);
+    if(!key) return {invalidROM, assemblyError(key)};
+
+    this->location = location;
+    pak = std::make_shared<vfs::directory>();
+    pak->setAttribute("board", document["game/board"].string());
+    pak->setAttribute("name", document["game/name"].string());
+    pak->setAttribute("title", document["game/title"].string());
+    pak->setAttribute("cpu", document["game/cpu"].string());
+    pak->setAttribute("rotation", document["game/rotation"].string());
+    pak->append("manifest.bml", manifest);
+    pak->append("program.rom", rom.data);
+    if(!key.data.empty()) pak->append("cpu.key", key.data);
+    return successful;
+  }
 
   // Sega SG-1000 based arcade
   if(document["game/board"].string() == "sega/sg1000a") {
@@ -137,9 +182,52 @@ auto Arcade::loadGeneric(string location, Markup::Node& document) -> LoadResult 
     pak->setAttribute("name",   document["game/name" ].string());
     pak->setAttribute("title",  document["game/title"].string());
     pak->setAttribute("region", document["game/region"].string());
+    pak->setAttribute("cpu",    document["game/cpu"].string());
     pak->append("manifest.bml", manifest);
     pak->append("program.rom",  rom.data);
 
+    return successful;
+  }
+
+  if(document["game/board"].string() == "konami/konamigv") {
+    auto bios = loadRoms(location, document, "maincpu-rom", resolver);
+    if(!bios) return {invalidROM, assemblyError(bios)};
+    if(bios.data.empty()) return {invalidROM, "Ensure your ROM is in a MAME-compatible .zip format and that konamigv.zip is available."};
+    auto eeprom = loadRoms(location, document, "eeprom", resolver);
+    if(!eeprom) return {invalidROM, assemblyError(eeprom)};
+
+    this->location = location;
+    pak = std::make_shared<vfs::directory>();
+    pak->setAttribute("board", document["game/board"].string());
+    pak->setAttribute("name", document["game/name"].string());
+    pak->setAttribute("title", document["game/title"].string());
+    pak->setAttribute("region", "NTSC-J");
+    pak->append("manifest.bml", manifest);
+    pak->append("bios.rom", bios.data);
+    for(auto nvram : document["game"].find("nvram")) {
+      auto name = nvram["name"].string();
+      if(!name) continue;
+      pak->append(name, std::vector<u8>(nvram["size"].natural(), nvram["fill"].natural()));
+      Pak::load(name, Location::suffix(name));
+    }
+    if(!eeprom.data.empty()) pak->append("eeprom.rom", eeprom.data);
+    pak->append("save.eeprom", eeprom.data.empty() ? std::vector<u8>(128, 0xff) : eeprom.data);
+    Pak::load("save.eeprom", ".eeprom");
+
+    auto flash = loadRoms(location, document, "flash", resolver);
+    if(!flash) return {invalidROM, assemblyError(flash)};
+    if(!flash.data.empty()) pak->append("flash.rom", flash.data);
+
+    auto disks = document["game"].find("disk");
+    if(!disks.empty()) {
+      auto disc = locateDisk(location, document, resolver);
+      if(!disc) {
+        return {romNotFound, {"CD image not found. Expected ", Location::dir(location), document["game/name"].string(), "/", disks.front()["name"].string(), ".chd"}};
+      }
+      auto cdrom = vfs::cdrom::open(disc);
+      if(!cdrom) return {invalidROM, {"CD image ", Location::file(disc), " could not be read."}};
+      pak->append("cd.rom", cdrom);
+    }
     return successful;
   }
 
@@ -231,5 +319,12 @@ auto Arcade::loadVs(string location, Markup::Node& document) -> LoadResult {
 }
 
 auto Arcade::save(string location) -> bool {
+  Pak::save("dips.bml", ".dip");
+  Pak::save("save.eeprom", ".eeprom");
+  if(auto document = BML::unserialize(manifest)) {
+    for(auto nvram : document["game"].find("nvram")) {
+      if(auto name = nvram["name"].string()) Pak::save(name, Location::suffix(name));
+    }
+  }
   return true;
 }

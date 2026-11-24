@@ -1,6 +1,10 @@
 add_library(mia STATIC mia.cpp mia.hpp resource/resource.cpp)
 add_library(ares::mia ALIAS mia)
 
+if(ARES_ENABLE_JVMMI)
+  target_compile_definitions(mia PRIVATE ARES_ENABLE_JVMMI)
+endif()
+
 add_sourcery_command(mia resource)
 
 if(ARES_ENABLE_CHD)

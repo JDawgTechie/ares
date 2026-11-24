@@ -6,6 +6,14 @@ add_library(ares::ares ALIAS ares)
 
 option(ARES_PROFILE_ACCURACY "Build to prefer emulation accuracy over performance in certain specific areas" OFF)
 option(ARES_PRECOMPILE_HEADERS "Precompile ares/ares.hpp header for performance" OFF)
+option(ARES_ENABLE_JVMMI "Enable Motion JPEG LaserActive disc images" OFF)
+if(ARES_ENABLE_JVMMI)
+  find_package(libjpeg-turbo 3 CONFIG REQUIRED)
+  target_link_libraries(ares PRIVATE libjpeg-turbo::turbojpeg-static)
+  target_compile_definitions(ares PRIVATE ARES_ENABLE_JVMMI)
+  target_enable_feature(ares "Motion JPEG LaserActive disc images")
+  target_sources(ares PRIVATE ares/laserdisc-jpeg.hpp)
+endif()
 option(
   ARES_UNITY_CORES
   "\

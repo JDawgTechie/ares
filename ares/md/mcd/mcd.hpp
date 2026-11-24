@@ -403,6 +403,8 @@ struct MCD : M68000, Thread {
     auto handleStopPointReached(s32 aba) -> void;
     auto updateCurrentVideoFrameNumber(s32 aba) -> void;
     auto loadCurrentVideoFrameIntoBuffer() -> void;
+    auto videoFrameAt(s32 index, bool leadIn, bool leadOut) -> const unsigned char*;
+    auto decodeVideoFrame(const unsigned char* frame, std::vector<unsigned char>& buffer, bool prefetch = false) -> void;
     auto videoFramePrefetchThread() -> void;
     auto decodeBiphaseCodeFromScanline(int lineNo) -> u32;
     auto power(bool reset, bool gateArrayReset) -> void;
@@ -449,6 +451,11 @@ struct MCD : M68000, Thread {
       n1 digitalMemoryFrameLatched;
       qon_desc videoFileHeader;
       qoi2_desc videoFrameHeader;
+#if defined(ARES_ENABLE_JVMMI)
+      JpegVideo jpeg;
+      JpegDecoder jpegDirect;
+      JpegDecoder jpegPrefetch;
+#endif
       int drawIndex;
       std::vector<unsigned char> videoFrameBuffers[2];
       std::vector<unsigned char> dummyBlankLineBuffer;

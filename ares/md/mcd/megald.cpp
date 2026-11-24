@@ -17,6 +17,11 @@ auto MCD::LD::load(string location) -> void {
     if(mmi.location()) mmi.close();
     mmi.open(location);
   }
+#if defined(ARES_ENABLE_JVMMI)
+  video.jpeg = {};
+  video.jpegDirect.reset();
+  video.jpegPrefetch.reset();
+#endif
 
   //attempt to locate the requested media in the mmi archive
   string mediaName = mcd.disc->attribute("media");
@@ -72,6 +77,26 @@ auto MCD::LD::load(string location) -> void {
 
   // Load and index our analog video data
   auto analogVideoFile = mmi.archive().findFile(analogVideoFileName);
+#if defined(ARES_ENABLE_JVMMI)
+  if(!analogVideoFile && analogVideoFileName && (location.iendsWith(".mjmmi") || location.iendsWith(".jvmmi"))) {
+    string jpegEntry{Location::notsuffix(analogVideoFileName), ".jvcv"};
+    if(auto jpegFile = mmi.archive().findFile(jpegEntry)) {
+      if(mmi.archive().isDataUncompressed(*jpegFile)) video.jpeg.open(mmi.archive().dataViewIfUncompressed(*jpegFile));
+      if(!video.jpeg.frameCount) debug(unusual, "[MCD::LD::load] Invalid Motion JPEG video: ", jpegEntry);
+    }
+  }
+
+  if(video.jpeg.frameCount) {
+    video.videoFrameHeader.width = JpegVideo::width;
+    video.videoFrameHeader.height = JpegVideo::height;
+    video.videoFrameHeader.channels = 3;
+    video.videoFrameHeader.colorspace = 0;
+    size_t offset = 0;
+    video.jpeg.indexRegion(video.leadInFrames, video.leadInFrameCount, offset);
+    video.jpeg.indexRegion(video.activeVideoFrames, video.activeVideoFrameCount, offset);
+    video.jpeg.indexRegion(video.leadOutFrames, video.leadOutFrameCount, offset);
+  } else
+#endif
   if (analogVideoFile) {
   // Retrieve the analog video file
     if (!mmi.archive().isDataUncompressed(*analogVideoFile)) {
@@ -173,6 +198,11 @@ auto MCD::LD::unload() -> void {
   }
 
   // Close the mmi file
+#if defined(ARES_ENABLE_JVMMI)
+  video.jpeg = {};
+  video.jpegDirect.reset();
+  video.jpegPrefetch.reset();
+#endif
   mmi.close();
 }
 
@@ -2798,16 +2828,27 @@ auto MCD::LD::updateCurrentVideoFrameNumber(s32 aba) -> void {
   }
 }
 
+auto MCD::LD::videoFrameAt(s32 index, bool leadIn, bool leadOut) -> const unsigned char* {
+  const auto& frames = leadIn ? video.leadInFrames : leadOut ? video.leadOutFrames : video.activeVideoFrames;
+  return index >= 0 && size_t(index) < frames.size() ? frames[index] : nullptr;
+}
+
+auto MCD::LD::decodeVideoFrame(const unsigned char* frame, std::vector<unsigned char>& buffer, bool prefetch) -> void {
+  buffer.resize(video.videoFrameHeader.width * video.videoFrameHeader.height * 3);
+#if defined(ARES_ENABLE_JVMMI)
+  if(video.jpeg.frameCount) {
+    auto& decoder = prefetch ? video.jpegPrefetch : video.jpegDirect;
+    if(!decoder.decode(video.jpeg.packet(frame), buffer)) buffer.clear();
+    return;
+  }
+#endif
+  size_t bytes = qon_decode_frame_size(frame);
+  qoi2_decode_data(frame + QON_FRAME_SIZE_SIZE, bytes, &video.videoFrameHeader, nullptr, buffer.data(), 3);
+}
+
 auto MCD::LD::loadCurrentVideoFrameIntoBuffer() -> void {
   // Locate the new video frame in the source file
-  const unsigned char* videoFrameCompressed = nullptr;
-  if (video.currentVideoFrameLeadIn) {
-    videoFrameCompressed = (video.currentVideoFrameIndex < video.leadInFrameCount ? video.leadInFrames[video.currentVideoFrameIndex] : nullptr);
-  } else if (video.currentVideoFrameLeadOut) {
-    videoFrameCompressed = (video.currentVideoFrameIndex < video.leadOutFrameCount ? video.leadOutFrames[video.currentVideoFrameIndex] : nullptr);
-  } else {
-    videoFrameCompressed = (video.currentVideoFrameIndex < video.activeVideoFrameCount ? video.activeVideoFrames[video.currentVideoFrameIndex] : nullptr);
-  }
+  auto videoFrameCompressed = videoFrameAt(video.currentVideoFrameIndex, video.currentVideoFrameLeadIn, video.currentVideoFrameLeadOut);
   if (videoFrameCompressed == nullptr) {
     return;
   }
@@ -2815,16 +2856,12 @@ auto MCD::LD::loadCurrentVideoFrameIntoBuffer() -> void {
   // Allocate memory for the video frame buffer if it's currently empty
   int buildIndex = video.drawIndex ^ 0x01;
   auto& buildFrameBuffer = video.videoFrameBuffers[buildIndex];
-  if (buildFrameBuffer.empty()) {
-    buildFrameBuffer.resize(video.videoFrameHeader.width * video.videoFrameHeader.height * 3);
-  }
 
   // If we were prefetching the wrong frame, or if no prefetch was active, load the required frame immediately here into
   // the build framebuffer.
   bool loadedDirectly = false;
   if ((videoFramePrefetchTarget == nullptr) || (videoFramePrefetchTarget != videoFrameCompressed)) {
-    size_t frameSizeCompressed = qon_decode_frame_size(videoFrameCompressed);
-    qoi2_decode_data(videoFrameCompressed + QON_FRAME_SIZE_SIZE, frameSizeCompressed, &video.videoFrameHeader, nullptr, buildFrameBuffer.data(), 3);
+    decodeVideoFrame(videoFrameCompressed, buildFrameBuffer);
     loadedDirectly = true;
   }
 
@@ -2894,13 +2931,7 @@ auto MCD::LD::loadCurrentVideoFrameIntoBuffer() -> void {
   // Queue a prefetch for the likely next video frame. Note that if we prefetched the wrong frame last time, it's
   // possible that a prefetch operation is still being performed. This is ok, as we can queue up another prefetch
   // operation here once the original request has been latched, which we've already tested for above.
-  if (newVideoFrameLeadIn) {
-    videoFrameCompressed = (newVideoFrameIndex < video.leadInFrameCount ? video.leadInFrames[newVideoFrameIndex] : nullptr);
-  } else if (newVideoFrameLeadOut) {
-    videoFrameCompressed = (newVideoFrameIndex < video.leadOutFrameCount ? video.leadOutFrames[newVideoFrameIndex] : nullptr);
-  } else {
-    videoFrameCompressed = (newVideoFrameIndex < video.activeVideoFrameCount ? video.activeVideoFrames[newVideoFrameIndex] : nullptr);
-  }
+  videoFrameCompressed = videoFrameAt(newVideoFrameIndex, newVideoFrameLeadIn, newVideoFrameLeadOut);
   if (videoFrameCompressed == nullptr) {
     return;
   }
@@ -2928,14 +2959,7 @@ auto MCD::LD::videoFramePrefetchThread() -> void {
     videoFramePrefetchPending.clear();
     videoFramePrefetchPending.notify_all();
 
-    // Allocate memory for the prefetch frame buffer if it's currently empty
-    if (videoFramePrefetchBuffer.empty()) {
-      videoFramePrefetchBuffer.resize(video.videoFrameHeader.width * video.videoFrameHeader.height * 3);
-    }
-
-    // Decode the QOI2 compressed video frame into the buffer
-    size_t frameSizeCompressed = qon_decode_frame_size(videoFramePrefetchTarget);
-    qoi2_decode_data(videoFramePrefetchTarget + QON_FRAME_SIZE_SIZE, frameSizeCompressed, &video.videoFrameHeader, nullptr, videoFramePrefetchBuffer.data(), 3);
+    decodeVideoFrame(videoFramePrefetchTarget, videoFramePrefetchBuffer, true);
 
     // Trigger a notification that the prefetch operation is complete
     videoFramePrefetchComplete.test_and_set();
@@ -2954,6 +2978,14 @@ auto MCD::LD::decodeBiphaseCodeFromScanline(int lineNo) -> u32 {
   if (buildFrameBuffer.empty()) {
     return 0;
   }
+#if defined(ARES_ENABLE_JVMMI)
+  if(video.jpeg.frameCount) {
+    size_t index = video.currentVideoFrameIndex;
+    if(!video.currentVideoFrameLeadIn) index += video.leadInFrameCount;
+    if(video.currentVideoFrameLeadOut) index += video.activeVideoFrameCount;
+    return video.jpeg.code(index, lineNo);
+  }
+#endif
 
   // Attempt to locate the start of the 24-bit biphase coded signal. As per IEC 60857:1986, the first bit is the "key"
   // bit, and will always be logical level 1. This is represented by a transition from IRE 0 to IRE 100 at the mid-point

@@ -12,6 +12,9 @@
 
 #include <qon/qon.h>
 #include <qon/qoi2.h>
+#if defined(ARES_ENABLE_JVMMI)
+  #include <ares/laserdisc-jpeg.hpp>
+#endif
 
 #include <component/processor/m68000/m68000.hpp>
 #include <component/processor/z80/z80.hpp>

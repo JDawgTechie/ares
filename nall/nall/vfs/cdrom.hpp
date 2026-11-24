@@ -23,7 +23,7 @@ struct cdrom : file {
     struct enable_make_shared : cdrom { using cdrom::cdrom; };
     auto instance = std::make_shared<enable_make_shared>();
 
-    if (location.iendsWith(".mmi")) {
+    if (location.iendsWith(".mmi") || location.iendsWith(".mjmmi") || location.iendsWith(".jvmmi")) {
       instance->_archive = std::make_unique<Decode::ZIP>();
       if (!instance->_archive->open(location)) return {};
 

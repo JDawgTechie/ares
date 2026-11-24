@@ -1,5 +1,8 @@
 struct PCEngineLD : LaserDisc {
   auto name() -> string override { return "LaserActive (NEC PAC)"; }
+#if defined(ARES_ENABLE_JVMMI)
+  auto extensions() -> std::vector<string> override { return {"mmi", "mjmmi", "jvmmi"}; }
+#endif
   auto load(string location) -> LoadResult override;
   auto save(string location) -> bool override;
 };

@@ -11,6 +11,9 @@
 
 #include <qon/qon.h>
 #include <qon/qoi2.h>
+#if defined(ARES_ENABLE_JVMMI)
+  #include <ares/laserdisc-jpeg.hpp>
+#endif
 
 #include <component/processor/huc6280/huc6280.hpp>
 #include <component/audio/msm5205/msm5205.hpp>
